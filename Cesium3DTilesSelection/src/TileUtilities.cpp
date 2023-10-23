@@ -51,6 +51,97 @@ bool withinPolygons(
   return withinPolygons(*maybeRectangle, cartographicPolygons);
 }
 
+std::tuple<bool,int> withinPolygonsAndReturnIndex(
+    const CesiumGeospatial::GlobeRectangle& rectangle,
+    const std::vector<CartographicPolygon>& cartographicPolygons) noexcept {
+
+  glm::dvec2 rectangleCorners[] = {
+      glm::dvec2(rectangle.getWest(), rectangle.getSouth()),
+      glm::dvec2(rectangle.getWest(), rectangle.getNorth()),
+      glm::dvec2(rectangle.getEast(), rectangle.getNorth()),
+      glm::dvec2(rectangle.getEast(), rectangle.getSouth())};
+
+  glm::dvec2 rectangleEdges[] = {
+      rectangleCorners[1] - rectangleCorners[0],
+      rectangleCorners[2] - rectangleCorners[1],
+      rectangleCorners[3] - rectangleCorners[2],
+      rectangleCorners[0] - rectangleCorners[3]};
+
+  // Iterate through all polygons.
+  for (size_t i = 0; i < cartographicPolygons.size(); ++i) {
+    const CartographicPolygon& selection = cartographicPolygons[i];
+
+    const std::optional<CesiumGeospatial::GlobeRectangle>&
+        polygonBoundingRectangle = selection.getBoundingRectangle();
+    if (!polygonBoundingRectangle ||
+        !rectangle.computeIntersection(*polygonBoundingRectangle)) {
+      continue;
+    }
+
+    const std::vector<glm::dvec2>& vertices = selection.getVertices();
+    const std::vector<uint32_t>& indices = selection.getIndices();
+
+    // First check if an arbitrary point on the bounding globe rectangle is
+    // inside the polygon.
+    bool inside = false;
+    for (size_t j = 2; j < indices.size(); j += 3) {
+      if (withinTriangle(
+              rectangleCorners[0],
+              vertices[indices[j - 2]],
+              vertices[indices[j - 1]],
+              vertices[indices[j]])) {
+        inside = true;
+        break;
+      }
+    }
+
+    // If the arbitrary point was outside, then this polygon does not entirely
+    // cull the tile.
+    if (!inside) {
+      continue;
+    }
+
+    // Check if the polygon perimeter intersects the bounding globe rectangle
+    // edges.
+    bool intersectionFound = false;
+    for (size_t j = 0; j < vertices.size(); ++j) {
+      const glm::dvec2& a = vertices[j];
+      const glm::dvec2& b = vertices[(j + 1) % vertices.size()];
+
+      const glm::dvec2 ba = a - b;
+
+      // Check each rectangle edge.
+      for (size_t k = 0; k < 4; ++k) {
+        const glm::dvec2& cd = rectangleEdges[k];
+        const glm::dmat2 lineSegmentMatrix(cd, ba);
+        const glm::dvec2 ca = a - rectangleCorners[k];
+
+        // s and t are calculated such that:
+        // line_intersection = a + t * ab = c + s * cd
+        const glm::dvec2 st = glm::inverse(lineSegmentMatrix) * ca;
+
+        // check that the intersection is within the line segments
+        if (st.x <= 1.0 && st.x >= 0.0 && st.y <= 1.0 && st.y >= 0.0) {
+          intersectionFound = true;
+          break;
+        }
+      }
+
+      if (intersectionFound) {
+        break;
+      }
+    }
+
+    // There is no intersection with the perimeter and at least one point is
+    // inside the polygon so the tile is completely inside this polygon.
+    if (!intersectionFound) {
+      return std::make_tuple(true, int(i));
+    }
+  }
+
+  return std::make_tuple(false, -1);
+}
+
 bool withinPolygons(
     const CesiumGeospatial::GlobeRectangle& rectangle,
     const std::vector<CartographicPolygon>& cartographicPolygons) noexcept {
